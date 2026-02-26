@@ -2,7 +2,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 tfd = tfp.distributions
 
-def build_deepa_model(window_size, n_features):
+def build_deepar_model(window_size, n_features):
     inputs = tf.keras.layers.Input(shape=(window_size, n_features))
 
     #Capas de memoria profunda
