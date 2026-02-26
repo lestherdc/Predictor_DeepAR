@@ -18,8 +18,8 @@ from src.model_deepar import build_deepar_model
 ACCIONES = ["PLTR", "AAPL", "TSLA", "NVDA"]
 PERIOD = "60d"
 INTERVAL = "5m"
-WINDOW_SIZE = 60
-EPOCHS = 15
+WINDOW_SIZE = 100
+EPOCHS = 40
 BATCH_SIZE = 32
 
 
