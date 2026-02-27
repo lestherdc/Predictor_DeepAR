@@ -1,6 +1,10 @@
 # Predictor DeepAR
-Este predictor fue desarrolado por Amazon, el cual en simples palabras
-predice el rango en el cual estara el precio de una accion
+Este predictor es un hibrido, el cual usa un motor interno SVJ o mejor conocido como
+Stochastic Volatility Jump. Este predictor a diferencia del DeepAR original, solo
+calcula probabilidad basandose en la volatilidad actual, pero no sabe proyectar
+velas hacia el futuro. Por esta razon no puedo definir un "cuando" llegara 
+el precio junto con una probabilidad.
+
 
 ## Estructura del proyecto
 

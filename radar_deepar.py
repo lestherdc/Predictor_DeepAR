@@ -14,7 +14,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 # --- CONFIGURACIÓN REFORZADA ---
-SYMBOL = "TSLA"
+SYMBOL = "PLTR"
 WINDOW_SIZE = 100  # Ajustado a tu nuevo entrenamiento
 STEPS_TO_FORECAST = 12
 MODEL_PATH = f"models/{SYMBOL}/deepar_model.keras"
