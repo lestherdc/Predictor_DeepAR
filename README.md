@@ -5,6 +5,11 @@ calcula probabilidad basandose en la volatilidad actual, pero no sabe proyectar
 velas hacia el futuro. Por esta razon no puedo definir un "cuando" llegara 
 el precio junto con una probabilidad.
 
+## DeepAR
+Implementacion de DeepAR, se cambio el motor probabilistico, ya no predice
+numeros estaticos, generara una Distribucion Gaussiana de resultados futuros.
+
+
 
 ## Estructura del proyecto
 
