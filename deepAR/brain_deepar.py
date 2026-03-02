@@ -23,7 +23,7 @@ class DeepARModel:
         dist_layer = tfp.layers.DistributionLambda(
             lambda t: tfp.distributions.Normal(
                 loc=t[..., :1],
-                scale=1e-3 + tf.math.softplus(t[..., 1:])
+                scale=0.01 + tf.math.softplus(t[..., 1:]) * 1.5
             )
         )(params)
 

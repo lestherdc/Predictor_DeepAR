@@ -9,38 +9,38 @@ import tensorflow_probability as tfp
 import scipy.stats as stats
 
 # --- CONFIGURACIÓN ---
-SYMBOL = "PLTR"
+SYMBOL = "TSLA"
 WINDOW_SIZE = 100
 STEPS_TO_FORECAST = 12
 MODEL_PATH = f"models/{SYMBOL}/deepAR_model.keras"
 SCALER_PATH = f"models/{SYMBOL}/scalerAR.gz"
 
 
-# 1. FUNCIÓN MATEMÁTICA DE PROBABILIDAD (La que solicitaste)
-def calcular_probabilidad_temporal(dist, target_price, precio_actual):
-    """
-    Usa la distribución predicha por DeepAR para calcular la probabilidad
-    acumulada de alcanzar un objetivo.
-    """
-    # Extraemos media (mu) y desviación (sigma) del objeto de distribución de DeepAR
-    mu = dist.mean().numpy().flatten()[0]
-    sigma = dist.stddev().numpy().flatten()[0]
+# 1. FUNCIÓN MATEMÁTICA DE PROBABILIDAD
+def calcular_probabilidad_temporal(dist, target_price, precio_actual, scaler):
+    # 1. Extraemos mu y sigma (valores escalados entre 0 y 1)
+    mu_scaled = dist.mean().numpy().flatten()[0]
+    sigma_scaled = dist.stddev().numpy().flatten()[0]
 
-    # Cálculo del Z-Score (distancia en desviaciones estándar)
-    z_score = (target_price - mu) / (sigma + 1e-6)
+    # 2. DESESCALAMOS la volatilidad para llevarla a DÓLARES reales
+    # La volatilidad real es (sigma_escalada * rango_del_scaler)
+    rango_precio = scaler.data_range_[0]  # La diferencia entre el max y min del entrenamiento
+    sigma_real = sigma_scaled * rango_precio
+    mu_real = (mu_scaled * rango_precio) + scaler.data_min_[0]
+
+    # 3. Cálculo del Z-Score con valores REALES en dólares
+    # Añadimos un multiplicador de sensibilidad (2.5) para captar colas de mercado
+    z_score = (target_price - precio_actual) / (sigma_real * 2.5 + 1e-6)
 
     if target_price > precio_actual:
-        # Probabilidad de éxito para Resistencias (área a la derecha)
         prob = (1 - stats.norm.cdf(z_score)) * 100
     else:
-        # Probabilidad de éxito para Soportes (área a la izquierda)
         prob = stats.norm.cdf(z_score) * 100
 
-    # ETA: Estimación de tiempo basada en la volatilidad predicha
-    eta_velas = int(abs(target_price - precio_actual) / (sigma + 1e-9))
+    # ETA corregido con volatilidad real
+    eta_velas = int(abs(target_price - precio_actual) / (sigma_real + 1e-9))
 
     return round(prob, 1), eta_velas
-
 
 def descale_series(series, scaler):
     series = np.array(series).reshape(-1, 1)
@@ -82,7 +82,7 @@ def run_radar_deepar():
 
     # --- NIVELES A TESTEAR (Ejemplos basados en tu interés de visión) ---
     # Aquí es donde pondrás tus niveles detectados de otros días
-    niveles_interes = [137.50, 140.95, 132.63]
+    niveles_interes = [407.00, 394.10, 387.60, 383.80]
 
     print(f"\n" + "█" * 70)
     print(f" 📊 RADAR DE PROBABILIDAD DEEPAR: {SYMBOL}")
@@ -93,7 +93,7 @@ def run_radar_deepar():
     print("-" * 70)
 
     for target in niveles_interes:
-        prob, eta = calcular_probabilidad_temporal(dist_pred, target, actual_p)
+        prob, eta = calcular_probabilidad_temporal(dist_pred, target, actual_p, scaler)
         dist_pct = ((target - actual_p) / actual_p) * 100
 
         # Formateo de salida

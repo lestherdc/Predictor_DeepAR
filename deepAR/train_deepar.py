@@ -8,7 +8,7 @@ import tf_keras as keras
 from brain_deepar import DeepARModel
 
 # --- CONFIGURACIÓN ---
-SYMBOL = "PLTR"
+SYMBOL = "AAPL"
 WINDOW_SIZE = 100
 EPOCHS = 50
 BATCH_SIZE = 32
