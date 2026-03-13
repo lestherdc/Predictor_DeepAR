@@ -9,7 +9,12 @@ import tensorflow_probability as tfp
 import scipy.stats as stats
 
 # --- CONFIGURACIÓN ---
-SYMBOL = "TSLA"
+# SYMBOL = "TSLA"
+#Para entrada dinamica
+SYMBOL = input("Ingresa el Simbolo: ").upper().strip()
+niveles_raw = input("Ingresa niveles interes: ")
+niveles_interes = [float(n.strip()) for n in niveles_raw.split(",")]
+
 WINDOW_SIZE = 100
 STEPS_TO_FORECAST = 12
 MODEL_PATH = f"models/{SYMBOL}/deepAR_model.keras"
@@ -82,7 +87,7 @@ def run_radar_deepar():
 
     # --- NIVELES A TESTEAR (Ejemplos basados en tu interés de visión) ---
     # Aquí es donde pondrás tus niveles detectados de otros días
-    niveles_interes = [407.00, 394.10, 387.60, 383.80]
+    # niveles_interes = [406.00, 416.38, 394.70, 381.40]
 
     print(f"\n" + "█" * 70)
     print(f" 📊 RADAR DE PROBABILIDAD DEEPAR: {SYMBOL}")

@@ -1,0 +1,10 @@
+streamlit
+yfinance
+pandas
+numpy
+joblib
+tf-keras
+tensorflow
+tensorflow-probability
+scikit-learn
+scipy
