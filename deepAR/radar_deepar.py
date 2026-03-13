@@ -7,19 +7,17 @@ import tf_keras as keras
 import tensorflow as tf
 import tensorflow_probability as tfp
 import scipy.stats as stats
-import streamlit as st
 
 # --- 1. CONFIGURACIÓN DE RUTAS ABSOLUTAS ---
-# Obtenemos la ruta del directorio donde reside este archivo .py
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-# --- 2. DEFINICIÓN DE LA DISTRIBUCIÓN (PARA CARGA DE MODELO) ---
+# --- 2. DEFINICIÓN DE LA DISTRIBUCIÓN (CORREGIDA PARA EVITAR ERRORES DE NUMPY) ---
 def model_dist(t):
-    return tfp.distributions.Normal(
-        loc=t[..., :1],
-        scale=1e-3 + tf.math.softplus(t[..., 1:])
-    )
+    # Forzamos la conversión a tensores para evitar conflictos de dimensiones con Numpy
+    loc = tf.convert_to_tensor(t[..., :1], dtype=tf.float32)
+    scale = 1e-3 + tf.math.softplus(tf.convert_to_tensor(t[..., 1:], dtype=tf.float32))
+    return tfp.distributions.Normal(loc=loc, scale=scale)
 
 
 # --- 3. INTERFAZ Y ENTRADA DE DATOS ---
@@ -31,37 +29,31 @@ try:
         niveles_raw = st.text_input("Ingresa niveles interés (separados por coma):", "406.00, 416.38")
         ejecutar = st.button("Calcular Probabilidades")
     else:
-        raise Exception("Ejecución fuera de Streamlit")
+        raise Exception("Ejecución local")
 except Exception:
     SYMBOL = input("Ingresa el Simbolo: ").upper().strip()
     niveles_raw = input("Ingresa niveles interés: ")
     ejecutar = True
 
-# Procesamiento de niveles
 if niveles_raw:
     niveles_interes = [float(n.strip()) for n in niveles_raw.split(",")]
 else:
     niveles_interes = []
 
 WINDOW_SIZE = 100
-
-# --- 4. CONSTRUCCIÓN DE RUTAS DINÁMICAS ---
-# Esto evita el error de "Modelo no encontrado"
 MODEL_PATH = os.path.join(BASE_DIR, "models", SYMBOL, "deepAR_model.keras")
 SCALER_PATH = os.path.join(BASE_DIR, "models", SYMBOL, "scalerAR.gz")
 
 
-# --- 5. LÓGICA MATEMÁTICA ---
+# --- 4. LÓGICA DE PROBABILIDAD ---
 def calcular_probabilidad_temporal(dist, target_price, precio_actual, scaler):
     mu_scaled = dist.mean().numpy().flatten()[0]
     sigma_scaled = dist.stddev().numpy().flatten()[0]
 
-    # El scaler fue entrenado con [Close, Volume], usamos el rango del Close (índice 0)
     rango_precio = scaler.data_range_[0]
-    mu_real = (mu_scaled * rango_precio) + scaler.data_min_[0]
     sigma_real = sigma_scaled * rango_precio
 
-    # Ajuste de Z-Score para volatilidad institucional (2.5 sigmas)
+    # Z-Score ajustado a volatilidad institucional
     z_score = (target_price - precio_actual) / (sigma_real * 2.5 + 1e-6)
 
     if target_price > precio_actual:
@@ -73,52 +65,43 @@ def calcular_probabilidad_temporal(dist, target_price, precio_actual, scaler):
     return round(prob, 1), eta_velas
 
 
-# --- 6. EJECUCIÓN PRINCIPAL ---
+# --- 5. EJECUCIÓN PRINCIPAL ---
 def run_radar_deepar():
-    # Objetos personalizados para reconstruir la capa Probabilística
     custom_objects = {
         "DistributionLambda": tfp.layers.DistributionLambda,
         "model_dist": model_dist,
         "tf": tf
     }
 
-    # Verificación de existencia de archivos
     if not os.path.exists(MODEL_PATH):
-        msg = f"❌ Error: Archivo no encontrado en {MODEL_PATH}"
+        msg = f"❌ Error: Modelo no encontrado en {MODEL_PATH}"
         if 'st' in globals() and st.runtime.exists():
             st.error(msg)
         else:
             print(msg)
         return
 
-    log_msg = f"🧠 Analizando estructura de {SYMBOL}..."
-    if 'st' in globals() and st.runtime.exists():
-        st.info(log_msg)
-    else:
-        print(log_msg)
-
     try:
-        # Carga del modelo y el scaler
+        # CARGA CON SEGURIDAD DESACTIVADA (safe_mode=False)
         model = keras.models.load_model(
             MODEL_PATH,
             compile=False,
-            custom_objects=custom_objects
+            custom_objects=custom_objects,
+            safe_mode=False
         )
         scaler = joblib.load(SCALER_PATH)
 
-        # Obtención de datos actuales
+        # Obtención de datos reales
         df = yf.download(SYMBOL, period="5d", interval="5m", progress=False).dropna()
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
         actual_p = df['Close'].iloc[-1]
-
-        # Preprocesamiento de ventana
         data_scaled = scaler.transform(df[['Close', 'Volume']].values)
         current_window = data_scaled[-WINDOW_SIZE:]
         input_data = np.expand_dims(current_window, axis=0)
 
-        # Inferencia (DeepAR devuelve la distribución completa)
+        # Inferencia
         dist_pred = model(input_data)
 
         header = f"📊 RADAR DE PROBABILIDAD: {SYMBOL} | PRECIO: ${actual_p:.2f}"
@@ -138,10 +121,10 @@ def run_radar_deepar():
                 })
             st.table(pd.DataFrame(resultados))
         else:
-            print(f"\n{header}\n" + "-" * 50)
+            print(f"\n{header}\n" + "-" * 60)
             for target in niveles_interes:
                 prob, eta = calcular_probabilidad_temporal(dist_pred, target, actual_p, scaler)
-                print(f"Target: ${target:.2f} | Prob: {prob}% | ETA: {eta} velas")
+                print(f"Target: ${target:<8.2f} | Prob: {prob:>5}% | ETA: {eta:>2} velas")
 
     except Exception as e:
         error_msg = f"🔥 Error en ejecución: {str(e)}"
