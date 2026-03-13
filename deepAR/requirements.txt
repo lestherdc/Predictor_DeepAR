@@ -3,8 +3,8 @@ yfinance
 pandas
 numpy
 joblib
-tensorflow==2.15.0
-tensorflow-probability==0.23.0
+tensorflow>=2.15.0
+tensorflow-probability
 tf-keras
 scikit-learn
 scipy
