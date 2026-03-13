@@ -1,4 +1,8 @@
 import os
+
+# Ajuste de compatibilidad para evitar el error de descriptores de Numpy
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
 import yfinance as yf
 import pandas as pd
 import numpy as np
@@ -9,133 +13,105 @@ import tensorflow_probability as tfp
 import scipy.stats as stats
 import streamlit as st
 
-# --- 1. PARCHE DE COMPATIBILIDAD (CORRIGE EL ERROR DE DIMENSION VALUE) ---
-# Este bloque debe ir antes de definir model_dist o cargar el modelo.
+# --- PARCHE DE EMERGENCIA PARA TFP ---
+# Esto evita el choque de dimensiones entre Keras y TFP
 from tensorflow.python.ops import array_ops
 
-if not hasattr(np, 'bool'):
-    np.bool = bool  # Fix para compatibilidad con versiones viejas de TF/TFP
 
-# --- 2. CONFIGURACIÓN DE RUTAS ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-
-# --- 3. FUNCIÓN DE DISTRIBUCIÓN REFORZADA ---
 def model_dist(t):
-    # Forzamos la limpieza absoluta del tensor de entrada
+    # Forzamos conversión limpia a tensor de 32 bits
     t = tf.convert_to_tensor(t, dtype=tf.float32)
     loc = t[..., :1]
-    # Usamos un mínimo (1e-3) para asegurar que el modelo no colapse por división por cero
     scale = 1e-3 + tf.math.softplus(t[..., 1:])
     return tfp.distributions.Normal(loc=loc, scale=scale)
 
 
-# --- 4. INTERFAZ ---
-try:
-    if st.runtime.exists():
-        st.set_page_config(page_title="Radar DeepAR", layout="centered")
-        st.title("📊 Radar de Probabilidades")
-        SYMBOL = st.text_input("Símbolo:", value="TSLA").upper().strip()
-        niveles_raw = st.text_input("Niveles (separados por coma):", "406.00, 416.38")
-        ejecutar = st.button("Calcular Probabilidades")
-    else:
-        raise Exception()
-except:
-    SYMBOL = input("Símbolo: ").upper().strip()
-    niveles_raw = input("Niveles: ")
-    ejecutar = True
+# --- CONFIGURACIÓN DE RUTAS ABSOLUTAS ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-niveles_interes = [float(n.strip()) for n in niveles_raw.split(",")] if niveles_raw else []
-WINDOW_SIZE = 100
-MODEL_PATH = os.path.join(BASE_DIR, "models", SYMBOL, "deepAR_model.keras")
-SCALER_PATH = os.path.join(BASE_DIR, "models", SYMBOL, "scalerAR.gz")
+# --- INTERFAZ ---
+st.set_page_config(page_title="Radar DeepAR", layout="centered")
+st.title("📊 Radar de Probabilidades")
+
+SYMBOL = st.text_input("Símbolo:", value="TSLA").upper().strip()
+niveles_raw = st.text_input("Niveles (separados por coma):", "406.00, 416.38")
+ejecutar = st.button("Calcular Probabilidades")
 
 
-# --- 5. CÁLCULO DE PROBABILIDAD ---
+# --- LÓGICA DE CÁLCULO ---
 def calcular_probabilidad_temporal(dist, target_price, precio_actual, scaler):
-    # Extraemos media y desviación asegurando que sean escalares de Python
-    mu_scaled = float(tf.reduce_mean(dist.mean()).numpy())
-    sigma_scaled = float(tf.reduce_mean(dist.stddev()).numpy())
+    try:
+        mu_scaled = float(tf.reduce_mean(dist.mean()).numpy())
+        sigma_scaled = float(tf.reduce_mean(dist.stddev()).numpy())
 
-    rango_precio = scaler.data_range_[0]
-    mu_real = (mu_scaled * rango_precio) + scaler.data_min_[0]
-    sigma_real = sigma_scaled * rango_precio
+        rango_precio = scaler.data_range_[0]
+        sigma_real = sigma_scaled * rango_precio
 
-    # Z-Score ajustado a 2.5 sigmas (volatilidad institucional)
-    z_score = (target_price - precio_actual) / (sigma_real * 2.5 + 1e-6)
+        # Z-Score ajustado a volatilidad institucional
+        z_score = (target_price - precio_actual) / (sigma_real * 2.5 + 1e-6)
 
-    if target_price > precio_actual:
-        prob = (1 - stats.norm.cdf(z_score)) * 100
-    else:
-        prob = stats.norm.cdf(z_score) * 100
+        if target_price > precio_actual:
+            prob = (1 - stats.norm.cdf(z_score)) * 100
+        else:
+            prob = stats.norm.cdf(z_score) * 100
 
-    eta_velas = int(abs(target_price - precio_actual) / (sigma_real + 1e-9))
-    return round(float(prob), 1), eta_velas
+        eta_velas = int(abs(target_price - precio_actual) / (sigma_real + 1e-9))
+        return round(float(prob), 1), eta_velas
+    except:
+        return 0.0, 0
 
 
-# --- 6. EJECUCIÓN ---
-def run_radar_deepar():
-    custom_objects = {
-        "DistributionLambda": tfp.layers.DistributionLambda,
-        "model_dist": model_dist,
-        "tf": tf
-    }
+# --- PROCESO PRINCIPAL ---
+if ejecutar:
+    MODEL_PATH = os.path.join(BASE_DIR, "models", SYMBOL, "deepAR_model.keras")
+    SCALER_PATH = os.path.join(BASE_DIR, "models", SYMBOL, "scalerAR.gz")
 
     if not os.path.exists(MODEL_PATH):
-        st.error(f"Modelo no encontrado: {MODEL_PATH}")
-        return
+        st.error(f"Archivo no encontrado: {MODEL_PATH}")
+    else:
+        try:
+            with st.spinner("Cargando inteligencia de mercado..."):
+                # Carga blindada
+                custom_objects = {
+                    "DistributionLambda": tfp.layers.DistributionLambda,
+                    "model_dist": model_dist
+                }
 
-    try:
-        # Cargamos el modelo con el parche activo
-        model = keras.models.load_model(
-            MODEL_PATH,
-            custom_objects=custom_objects,
-            compile=False,
-            safe_mode=False
-        )
-        scaler = joblib.load(SCALER_PATH)
+                model = keras.models.load_model(
+                    MODEL_PATH,
+                    custom_objects=custom_objects,
+                    compile=False,
+                    safe_mode=False
+                )
+                scaler = joblib.load(SCALER_PATH)
 
-        # Mercado en tiempo real
-        df = yf.download(SYMBOL, period="5d", interval="5m", progress=False).dropna()
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+                # Mercado real
+                df = yf.download(SYMBOL, period="5d", interval="5m", progress=False).dropna()
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.get_level_values(0)
 
-        actual_p = df['Close'].iloc[-1]
-        data_scaled = scaler.transform(df[['Close', 'Volume']].values)
-        current_window = data_scaled[-WINDOW_SIZE:]
+                actual_p = df['Close'].iloc[-1]
+                data_scaled = scaler.transform(df[['Close', 'Volume']].values)
 
-        # El input debe ser float32 para que coincida con el tensor de Keras
-        input_data = np.expand_dims(current_window, axis=0).astype(np.float32)
+                # Inferencia
+                input_data = np.expand_dims(data_scaled[-100:], axis=0).astype(np.float32)
+                dist_pred = model(input_data)
 
-        # Predicción
-        dist_pred = model(input_data)
+                # Mostrar resultados
+                st.markdown(f"### 🎯 Resultados para {SYMBOL}")
+                st.write(f"Precio Actual: **${actual_p:.2f}**")
 
-        header = f"📊 RADAR {SYMBOL} | PRECIO: ${actual_p:.2f}"
+                if niveles_raw:
+                    niveles = [float(n.strip()) for n in niveles_raw.split(",")]
+                    res_list = []
+                    for n in niveles:
+                        p, e = calcular_probabilidad_temporal(dist_pred, n, actual_p, scaler)
+                        res_list.append({
+                            "Nivel": f"${n:.2f}",
+                            "Probabilidad": f"{p}%",
+                            "ETA Est.": f"{e} velas"
+                        })
+                    st.table(pd.DataFrame(res_list))
 
-        if st.runtime.exists():
-            st.markdown(f"### {header}")
-            resultados = []
-            for target in niveles_interes:
-                prob, eta = calcular_probabilidad_temporal(dist_pred, target, actual_p, scaler)
-                dist_pct = ((target - actual_p) / actual_p) * 100
-                signo = "+" if target > actual_p else ""
-                resultados.append({
-                    "OBJETIVO": f"${target:.2f}",
-                    "DISTANCIA": f"{signo}{dist_pct:.2f}%",
-                    "PROBABILIDAD": f"{prob}%",
-                    "ETA": f"{eta} velas"
-                })
-            st.table(pd.DataFrame(resultados))
-        else:
-            print(f"\n{header}\n" + "-" * 50)
-            for target in niveles_interes:
-                prob, eta = calcular_probabilidad_temporal(dist_pred, target, actual_p, scaler)
-                print(f"Target: ${target:.2f} | Prob: {prob}% | ETA: {eta} velas")
-
-    except Exception as e:
-        # Mostramos el error detallado para saber si el parche funcionó
-        st.error(f"🔥 Error en capa de distribución: {str(e)}")
-
-
-if __name__ == "__main__":
-    if ejecutar:
-        run_radar_deepar()
+        except Exception as e:
+            st.error(f"Error al procesar el modelo: {str(e)}")
