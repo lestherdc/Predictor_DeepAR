@@ -9,30 +9,34 @@ import tensorflow_probability as tfp
 import scipy.stats as stats
 import streamlit as st
 
-# --- 1. CONFIGURACIÓN DE RUTAS ---
+# --- 1. PARCHE DE COMPATIBILIDAD (CORRIGE EL ERROR DE DIMENSION VALUE) ---
+# Este bloque debe ir antes de definir model_dist o cargar el modelo.
+from tensorflow.python.ops import array_ops
+
+if not hasattr(np, 'bool'):
+    np.bool = bool  # Fix para compatibilidad con versiones viejas de TF/TFP
+
+# --- 2. CONFIGURACIÓN DE RUTAS ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
-# --- 2. FUNCIÓN DE DISTRIBUCIÓN (BLINDADA) ---
+# --- 3. FUNCIÓN DE DISTRIBUCIÓN REFORZADA ---
 def model_dist(t):
-    """
-    Esta función reconstruye la salida probabilística.
-    Usamos tf.cast y convert_to_tensor para limpiar cualquier residuo de Numpy.
-    """
+    # Forzamos la limpieza absoluta del tensor de entrada
     t = tf.convert_to_tensor(t, dtype=tf.float32)
-    # Separamos media y desviación estándar
     loc = t[..., :1]
+    # Usamos un mínimo (1e-3) para asegurar que el modelo no colapse por división por cero
     scale = 1e-3 + tf.math.softplus(t[..., 1:])
     return tfp.distributions.Normal(loc=loc, scale=scale)
 
 
-# --- 3. INTERFAZ DE USUARIO ---
+# --- 4. INTERFAZ ---
 try:
     if st.runtime.exists():
         st.set_page_config(page_title="Radar DeepAR", layout="centered")
         st.title("📊 Radar de Probabilidades")
-        SYMBOL = st.text_input("Ingresa el Símbolo (ej: PLTR, TSLA):", value="TSLA").upper().strip()
-        niveles_raw = st.text_input("Niveles de interés (separados por coma):", "406.00, 416.38")
+        SYMBOL = st.text_input("Símbolo:", value="TSLA").upper().strip()
+        niveles_raw = st.text_input("Niveles (separados por coma):", "406.00, 416.38")
         ejecutar = st.button("Calcular Probabilidades")
     else:
         raise Exception()
@@ -47,11 +51,11 @@ MODEL_PATH = os.path.join(BASE_DIR, "models", SYMBOL, "deepAR_model.keras")
 SCALER_PATH = os.path.join(BASE_DIR, "models", SYMBOL, "scalerAR.gz")
 
 
-# --- 4. CÁLCULO DE PROBABILIDAD ---
+# --- 5. CÁLCULO DE PROBABILIDAD ---
 def calcular_probabilidad_temporal(dist, target_price, precio_actual, scaler):
-    # Obtenemos media y desviación desde el objeto de distribución de TFP
-    mu_scaled = tf.reduce_mean(dist.mean()).numpy()
-    sigma_scaled = tf.reduce_mean(dist.stddev()).numpy()
+    # Extraemos media y desviación asegurando que sean escalares de Python
+    mu_scaled = float(tf.reduce_mean(dist.mean()).numpy())
+    sigma_scaled = float(tf.reduce_mean(dist.stddev()).numpy())
 
     rango_precio = scaler.data_range_[0]
     mu_real = (mu_scaled * rango_precio) + scaler.data_min_[0]
@@ -69,9 +73,8 @@ def calcular_probabilidad_temporal(dist, target_price, precio_actual, scaler):
     return round(float(prob), 1), eta_velas
 
 
-# --- 5. EJECUCIÓN ---
+# --- 6. EJECUCIÓN ---
 def run_radar_deepar():
-    # Mapeamos la capa y la función para que Keras sepa cómo reconstruirlas
     custom_objects = {
         "DistributionLambda": tfp.layers.DistributionLambda,
         "model_dist": model_dist,
@@ -79,11 +82,11 @@ def run_radar_deepar():
     }
 
     if not os.path.exists(MODEL_PATH):
-        st.error(f"Modelo no encontrado en: {MODEL_PATH}")
+        st.error(f"Modelo no encontrado: {MODEL_PATH}")
         return
 
     try:
-        # Cargamos el modelo ignorando la seguridad de Lambda y forzando objetos personalizados
+        # Cargamos el modelo con el parche activo
         model = keras.models.load_model(
             MODEL_PATH,
             custom_objects=custom_objects,
@@ -92,19 +95,21 @@ def run_radar_deepar():
         )
         scaler = joblib.load(SCALER_PATH)
 
-        # Datos de mercado
+        # Mercado en tiempo real
         df = yf.download(SYMBOL, period="5d", interval="5m", progress=False).dropna()
         if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
 
         actual_p = df['Close'].iloc[-1]
         data_scaled = scaler.transform(df[['Close', 'Volume']].values)
         current_window = data_scaled[-WINDOW_SIZE:]
+
+        # El input debe ser float32 para que coincida con el tensor de Keras
         input_data = np.expand_dims(current_window, axis=0).astype(np.float32)
 
-        # Inferencia
+        # Predicción
         dist_pred = model(input_data)
 
-        header = f"📊 RADAR {SYMBOL} | PRECIO ACTUAL: ${actual_p:.2f}"
+        header = f"📊 RADAR {SYMBOL} | PRECIO: ${actual_p:.2f}"
 
         if st.runtime.exists():
             st.markdown(f"### {header}")
@@ -127,7 +132,8 @@ def run_radar_deepar():
                 print(f"Target: ${target:.2f} | Prob: {prob}% | ETA: {eta} velas")
 
     except Exception as e:
-        st.error(f"🔥 Error Crítico: {str(e)}")
+        # Mostramos el error detallado para saber si el parche funcionó
+        st.error(f"🔥 Error en capa de distribución: {str(e)}")
 
 
 if __name__ == "__main__":
