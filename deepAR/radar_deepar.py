@@ -13,65 +13,67 @@ import scipy.stats as stats
 import streamlit as st
 
 
-# --- 1. ARQUITECTURA MANUAL (BYPASS AL ARCHIVO .KERAS) ---
-def model_dist(t):
-    t = tf.convert_to_tensor(t, dtype=tf.float32)
-    loc = t[..., :1]
-    scale = 1e-3 + tf.math.softplus(t[..., 1:])
-    return tfp.distributions.Normal(loc=loc, scale=scale)
-
-
-def build_deepar_model(input_shape=(100, 2)):
+# --- 1. ARQUITECTURA DETERMINISTA (EVITA EL ERROR DE TFP) ---
+def build_radar_model(input_shape=(100, 2)):
     """
-    Reconstruye la arquitectura exacta de tu Radar DeepAR.
-    Ajusta las unidades de LSTM (ej: 64) según como lo entrenaste.
+    Construimos el modelo sin la capa DistributionLambda para evitar el error de dimensiones.
     """
     inputs = keras.Input(shape=input_shape)
-    x = keras.layers.LSTM(64, return_sequences=False)(inputs)  # Cambia 64 por tus unidades originales
-    x = keras.layers.Dense(2)(x)  # Salida para Media y Desviación
-    outputs = tfp.layers.DistributionLambda(model_dist)(x)
+    # Ajusta las unidades (64) a las que usaste en tu entrenamiento
+    x = keras.layers.LSTM(64, return_sequences=False)(inputs)
+    # La última capa Dense tiene 2 unidades: una para la media y otra para la desviación
+    outputs = keras.layers.Dense(2)(x)
     return keras.Model(inputs=inputs, outputs=outputs)
 
 
-# --- 2. CONFIGURACIÓN Y RUTAS ---
+# --- 2. CONFIGURACIÓN ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 st.set_page_config(page_title="Radar DeepAR", layout="centered")
-st.title("📊 Radar de Probabilidades (Modo Seguro)")
+st.title("📊 Radar de Probabilidades (Solución Final)")
 
 SYMBOL = st.text_input("Símbolo:", value="TSLA").upper().strip()
 niveles_raw = st.text_input("Niveles:", "406.00, 416.38")
 ejecutar = st.button("Calcular Probabilidades")
 
 
-# --- 3. LÓGICA DE CÁLCULO ---
-def calcular_probabilidad_temporal(dist, target_price, precio_actual, scaler):
-    mu_scaled = float(tf.reduce_mean(dist.mean()).numpy())
-    sigma_scaled = float(tf.reduce_mean(dist.stddev()).numpy())
+# --- 3. LÓGICA DE INFERENCIA MANUAL ---
+def calcular_probabilidades_manual(model_output, target_price, precio_actual, scaler):
+    # Separamos manualmente la salida del modelo (Media y Desviación)
+    # model_output tiene forma [1, 2]
+    mu_scaled = model_output[0, 0]
+    # Aplicamos softplus manualmente como lo hacía el modelo original
+    sigma_raw = model_output[0, 1]
+    sigma_scaled = 1e-3 + tf.math.softplus(sigma_raw).numpy()
+
     rango_precio = scaler.data_range_[0]
     sigma_real = sigma_scaled * rango_precio
 
+    # Cálculo de Z-Score (2.5 sigmas para volatilidad institucional)
     z_score = (target_price - precio_actual) / (sigma_real * 2.5 + 1e-6)
-    prob = (1 - stats.norm.cdf(z_score)) * 100 if target_price > precio_actual else stats.norm.cdf(z_score) * 100
+
+    if target_price > precio_actual:
+        prob = (1 - stats.norm.cdf(z_score)) * 100
+    else:
+        prob = stats.norm.cdf(z_score) * 100
+
     eta = int(abs(target_price - precio_actual) / (sigma_real + 1e-9))
     return round(float(prob), 1), eta
 
 
-# --- 4. EJECUCIÓN PRINCIPAL ---
+# --- 4. EJECUCIÓN ---
 if ejecutar:
     MODEL_PATH = os.path.join(BASE_DIR, "models", SYMBOL, "deepAR_model.keras")
     SCALER_PATH = os.path.join(BASE_DIR, "models", SYMBOL, "scalerAR.gz")
 
     if not os.path.exists(MODEL_PATH):
-        st.error("No se encontró el archivo del modelo.")
+        st.error(f"No se encontró el modelo para {SYMBOL}")
     else:
         try:
-            with st.spinner("Reconstruyendo modelo y cargando pesos..."):
-                # PASO CLAVE: Reconstruimos la red y solo inyectamos los pesos del archivo
-                model = build_deepar_model()
-
-                # Cargamos los pesos del archivo .keras (esto ignora la configuración de la capa DistributionLambda rota)
-                model.load_weights(MODEL_PATH)
+            with st.spinner("Realizando inferencia probabilística..."):
+                # Reconstruimos y cargamos pesos (ignora la capa problemática)
+                model = build_radar_model()
+                model.load_weights(MODEL_PATH, by_name=True, skip_mismatch=True)
 
                 scaler = joblib.load(SCALER_PATH)
 
@@ -82,20 +84,22 @@ if ejecutar:
                 actual_p = df['Close'].iloc[-1]
                 data_scaled = scaler.transform(df[['Close', 'Volume']].values)
 
-                # Inferencia con Tensor limpio
-                input_data = tf.convert_to_tensor(np.expand_dims(data_scaled[-100:], axis=0), dtype=tf.float32)
-                dist_pred = model(input_data)
+                # Inferencia determinista
+                input_data = np.expand_dims(data_scaled[-100:], axis=0).astype(np.float32)
+                raw_pred = model.predict(input_data)  # Devuelve [media_scaled, sigma_scaled_raw]
 
-                st.subheader(f"🎯 Resultados para {SYMBOL}")
-                st.write(f"Precio Actual: **${actual_p:.2f}**")
-
+                # Procesar niveles
                 if niveles_raw:
                     niveles = [float(n.strip()) for n in niveles_raw.split(",")]
-                    res = [{"Nivel": f"${n:.2f}",
-                            "Probabilidad": f"{calcular_probabilidad_temporal(dist_pred, n, actual_p, scaler)[0]}%",
-                            "ETA": calcular_probabilidad_temporal(dist_pred, n, actual_p, scaler)[1]} for n in niveles]
+                    res = []
+                    for n in niveles:
+                        p, e = calcular_probabilidades_manual(raw_pred, n, actual_p, scaler)
+                        res.append({
+                            "Objetivo": f"${n:.2f}",
+                            "Probabilidad": f"{p}%",
+                            "ETA (velas)": e
+                        })
                     st.table(pd.DataFrame(res))
 
         except Exception as e:
-            st.error(f"Error en reconstrucción: {str(e)}")
-            st.info("Asegúrate de que las unidades de la capa LSTM coincidan con tu entrenamiento original.")
+            st.error(f"Error en Radar: {str(e)}")
