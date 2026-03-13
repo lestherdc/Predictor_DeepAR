@@ -35,8 +35,8 @@ else:
 
 WINDOW_SIZE = 100
 STEPS_TO_FORECAST = 12
-MODEL_PATH = f"models/{SYMBOL}/deepAR_model.keras"
-SCALER_PATH = f"models/{SYMBOL}/scalerAR.gz"
+MODEL_PATH = f"./deepAR/models/{SYMBOL}/deepAR_model.keras"
+SCALER_PATH = f"./deepAR/models/{SYMBOL}/scalerAR.gz"
 
 
 # 1. FUNCIÓN MATEMÁTICA DE PROBABILIDAD (INTACTA)
