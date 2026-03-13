@@ -7,13 +7,31 @@ import tf_keras as keras
 import tensorflow as tf
 import tensorflow_probability as tfp
 import scipy.stats as stats
+import streamlit as st  # Importamos streamlit para la interfaz móvil
 
-# --- CONFIGURACIÓN ---
-# SYMBOL = "TSLA"
-#Para entrada dinamica
-SYMBOL = input("Ingresa el Simbolo: ").upper().strip()
-niveles_raw = input("Ingresa niveles interes: ")
-niveles_interes = [float(n.strip()) for n in niveles_raw.split(",")]
+# --- DETECCIÓN DE ENTORNO Y CONFIGURACIÓN ---
+# Si detectamos que corre en Streamlit, usamos sus widgets. Si no, usamos tus input()
+try:
+    # Esto solo funcionará si ejecutas con 'streamlit run'
+    st.set_page_config(page_title="Radar DeepAR", layout="centered")
+    st.title("📊 Radar de Probabilidades")
+
+    SYMBOL = st.text_input("Ingresa el Simbolo:", value="TSLA").upper().strip()
+    niveles_raw = st.text_input("Ingresa niveles interes (separados por coma):", "406.00, 416.38")
+
+    # El botón dispara la ejecución
+    ejecutar = st.button("Calcular Probabilidades")
+except:
+    # Si lo corres normal en tu PC (python radar_deepar.py)
+    SYMBOL = input("Ingresa el Simbolo: ").upper().strip()
+    niveles_raw = input("Ingresa niveles interes: ")
+    ejecutar = True
+
+# Procesamiento de niveles (tu lógica original)
+if niveles_raw:
+    niveles_interes = [float(n.strip()) for n in niveles_raw.split(",")]
+else:
+    niveles_interes = []
 
 WINDOW_SIZE = 100
 STEPS_TO_FORECAST = 12
@@ -21,20 +39,13 @@ MODEL_PATH = f"models/{SYMBOL}/deepAR_model.keras"
 SCALER_PATH = f"models/{SYMBOL}/scalerAR.gz"
 
 
-# 1. FUNCIÓN MATEMÁTICA DE PROBABILIDAD
+# 1. FUNCIÓN MATEMÁTICA DE PROBABILIDAD (INTACTA)
 def calcular_probabilidad_temporal(dist, target_price, precio_actual, scaler):
-    # 1. Extraemos mu y sigma (valores escalados entre 0 y 1)
     mu_scaled = dist.mean().numpy().flatten()[0]
     sigma_scaled = dist.stddev().numpy().flatten()[0]
-
-    # 2. DESESCALAMOS la volatilidad para llevarla a DÓLARES reales
-    # La volatilidad real es (sigma_escalada * rango_del_scaler)
-    rango_precio = scaler.data_range_[0]  # La diferencia entre el max y min del entrenamiento
+    rango_precio = scaler.data_range_[0]
     sigma_real = sigma_scaled * rango_precio
     mu_real = (mu_scaled * rango_precio) + scaler.data_min_[0]
-
-    # 3. Cálculo del Z-Score con valores REALES en dólares
-    # Añadimos un multiplicador de sensibilidad (2.5) para captar colas de mercado
     z_score = (target_price - precio_actual) / (sigma_real * 2.5 + 1e-6)
 
     if target_price > precio_actual:
@@ -42,10 +53,9 @@ def calcular_probabilidad_temporal(dist, target_price, precio_actual, scaler):
     else:
         prob = stats.norm.cdf(z_score) * 100
 
-    # ETA corregido con volatilidad real
     eta_velas = int(abs(target_price - precio_actual) / (sigma_real + 1e-9))
-
     return round(prob, 1), eta_velas
+
 
 def descale_series(series, scaler):
     series = np.array(series).reshape(-1, 1)
@@ -55,25 +65,31 @@ def descale_series(series, scaler):
 
 
 def run_radar_deepar():
-    # Parche de objetos personalizados para TensorFlow Probability
     custom_objects = {"DistributionLambda": tfp.layers.DistributionLambda, "tf": tf}
 
     if not os.path.exists(MODEL_PATH):
-        print(f"❌ Error: Modelo no encontrado en {MODEL_PATH}")
+        msg = f"❌ Error: Modelo no encontrado en {MODEL_PATH}"
+        if 'st' in globals():
+            st.error(msg)
+        else:
+            print(msg)
         return
 
-    print(f"🧠 Cargando modelo DeepAR desde {MODEL_PATH}...")
+    # Usamos st.write para que lo veas en el móvil, o print para la PC
+    log_msg = f"🧠 Cargando modelo DeepAR para {SYMBOL}..."
+    if 'st' in globals():
+        st.info(log_msg)
+    else:
+        print(log_msg)
 
-    # 2. Cargar con safe_mode=False para permitir la capa Lambda
     model = keras.models.load_model(
         MODEL_PATH,
         compile=False,
         custom_objects=custom_objects,
-        safe_mode=False  # <--- ESTA ES LA CLAVE PARA ELIMINAR EL ERROR
+        safe_mode=False
     )
     scaler = joblib.load(SCALER_PATH)
 
-    # Obtener datos recientes
     df = yf.download(SYMBOL, period="5d", interval="5m", progress=False).dropna()
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
 
@@ -81,34 +97,40 @@ def run_radar_deepar():
     data_scaled = scaler.transform(df[['Close', 'Volume']].values)
     current_window = data_scaled[-WINDOW_SIZE:]
 
-    # --- PREDICCIÓN PROBABILÍSTICA ---
     input_data = np.expand_dims(current_window, axis=0)
-    dist_pred = model(input_data)  # Esto genera la distribución mu/sigma
+    dist_pred = model(input_data)
 
-    # --- NIVELES A TESTEAR (Ejemplos basados en tu interés de visión) ---
-    # Aquí es donde pondrás tus niveles detectados de otros días
-    # niveles_interes = [406.00, 416.38, 394.70, 381.40]
+    # PREPARAR SALIDA
+    header = f"📊 RADAR DE PROBABILIDAD DEEPAR: {SYMBOL} | PRECIO: ${actual_p:.2f}"
 
-    print(f"\n" + "█" * 70)
-    print(f" 📊 RADAR DE PROBABILIDAD DEEPAR: {SYMBOL}")
-    print(f" 💰 PRECIO ACTUAL: ${actual_p:.2f}")
-    print("█" * 70)
-
-    print(f"{'OBJETIVO':<12} | {'DISTANCIA':<10} | {'PROBABILIDAD':<15} | {'ETA EST.'}")
-    print("-" * 70)
-
-    for target in niveles_interes:
-        prob, eta = calcular_probabilidad_temporal(dist_pred, target, actual_p, scaler)
-        dist_pct = ((target - actual_p) / actual_p) * 100
-
-        # Formateo de salida
-        signo = "+" if target > actual_p else ""
-        print(f"${target:<11.2f} | {signo}{dist_pct:>7.2f}% | {prob:>12}% | {eta:>2} velas")
-
-    print("-" * 70)
-    print(f"INFO: Probabilidades calculadas mediante Z-Score sobre Distribución Normal.")
-    print("█" * 70)
+    if 'st' in globals():
+        st.markdown(f"### {header}")
+        resultados = []
+        for target in niveles_interes:
+            prob, eta = calcular_probabilidad_temporal(dist_pred, target, actual_p, scaler)
+            dist_pct = ((target - actual_p) / actual_p) * 100
+            signo = "+" if target > actual_p else ""
+            resultados.append({
+                "OBJETIVO": f"${target:.2f}",
+                "DISTANCIA": f"{signo}{dist_pct:.2f}%",
+                "PROBABILIDAD": f"{prob}%",
+                "ETA": f"{eta} velas"
+            })
+        st.table(pd.DataFrame(resultados))
+    else:
+        print("\n" + "█" * 70)
+        print(header)
+        print("█" * 70)
+        print(f"{'OBJETIVO':<12} | {'DISTANCIA':<10} | {'PROBABILIDAD':<15} | {'ETA EST.'}")
+        print("-" * 70)
+        for target in niveles_interes:
+            prob, eta = calcular_probabilidad_temporal(dist_pred, target, actual_p, scaler)
+            dist_pct = ((target - actual_p) / actual_p) * 100
+            signo = "+" if target > actual_p else ""
+            print(f"${target:<11.2f} | {signo}{dist_pct:>7.2f}% | {prob:>12}% | {eta:>2} velas")
+        print("-" * 70)
 
 
 if __name__ == "__main__":
-    run_radar_deepar()
+    if ejecutar:
+        run_radar_deepar()
