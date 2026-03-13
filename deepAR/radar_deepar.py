@@ -7,6 +7,7 @@ import tf_keras as keras
 import tensorflow as tf
 import tensorflow_probability as tfp
 import scipy.stats as stats
+import streamlit as st
 
 # --- 1. CONFIGURACIÓN DE RUTAS ABSOLUTAS ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
