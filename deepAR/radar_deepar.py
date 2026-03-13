@@ -13,102 +13,89 @@ import scipy.stats as stats
 import streamlit as st
 
 
-# --- 1. FUNCIÓN DE DISTRIBUCIÓN PURA (SIN DEPENDENCIAS DE NUMPY) ---
+# --- 1. ARQUITECTURA MANUAL (BYPASS AL ARCHIVO .KERAS) ---
 def model_dist(t):
-    # Forzamos la extracción manual de valores para evitar que TFP busque el atributo .shape
     t = tf.convert_to_tensor(t, dtype=tf.float32)
-    # t[..., :1] es loc, t[..., 1:] es scale
-    loc = tf.gather(t, [0], axis=-1)
-    scale = 1e-3 + tf.math.softplus(tf.gather(t, [1], axis=-1))
+    loc = t[..., :1]
+    scale = 1e-3 + tf.math.softplus(t[..., 1:])
     return tfp.distributions.Normal(loc=loc, scale=scale)
 
 
-# --- 2. CONFIGURACIÓN DE RUTAS ---
+def build_deepar_model(input_shape=(100, 2)):
+    """
+    Reconstruye la arquitectura exacta de tu Radar DeepAR.
+    Ajusta las unidades de LSTM (ej: 64) según como lo entrenaste.
+    """
+    inputs = keras.Input(shape=input_shape)
+    x = keras.layers.LSTM(64, return_sequences=False)(inputs)  # Cambia 64 por tus unidades originales
+    x = keras.layers.Dense(2)(x)  # Salida para Media y Desviación
+    outputs = tfp.layers.DistributionLambda(model_dist)(x)
+    return keras.Model(inputs=inputs, outputs=outputs)
+
+
+# --- 2. CONFIGURACIÓN Y RUTAS ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 st.set_page_config(page_title="Radar DeepAR", layout="centered")
-st.title("📊 Radar de Probabilidades")
+st.title("📊 Radar de Probabilidades (Modo Seguro)")
 
 SYMBOL = st.text_input("Símbolo:", value="TSLA").upper().strip()
-niveles_raw = st.text_input("Niveles (separados por coma):", "406.00, 416.38")
+niveles_raw = st.text_input("Niveles:", "406.00, 416.38")
 ejecutar = st.button("Calcular Probabilidades")
 
 
+# --- 3. LÓGICA DE CÁLCULO ---
 def calcular_probabilidad_temporal(dist, target_price, precio_actual, scaler):
-    # Extraemos media y desviación usando métodos puramente de TensorFlow
-    mu_scaled = tf.reduce_mean(dist.mean()).numpy()
-    sigma_scaled = tf.reduce_mean(dist.stddev()).numpy()
-
+    mu_scaled = float(tf.reduce_mean(dist.mean()).numpy())
+    sigma_scaled = float(tf.reduce_mean(dist.stddev()).numpy())
     rango_precio = scaler.data_range_[0]
-    mu_real = (mu_scaled * rango_precio) + scaler.data_min_[0]
     sigma_real = sigma_scaled * rango_precio
 
     z_score = (target_price - precio_actual) / (sigma_real * 2.5 + 1e-6)
-
-    if target_price > precio_actual:
-        prob = (1 - stats.norm.cdf(z_score)) * 100
-    else:
-        prob = stats.norm.cdf(z_score) * 100
-
+    prob = (1 - stats.norm.cdf(z_score)) * 100 if target_price > precio_actual else stats.norm.cdf(z_score) * 100
     eta = int(abs(target_price - precio_actual) / (sigma_real + 1e-9))
     return round(float(prob), 1), eta
 
 
+# --- 4. EJECUCIÓN PRINCIPAL ---
 if ejecutar:
     MODEL_PATH = os.path.join(BASE_DIR, "models", SYMBOL, "deepAR_model.keras")
     SCALER_PATH = os.path.join(BASE_DIR, "models", SYMBOL, "scalerAR.gz")
 
     if not os.path.exists(MODEL_PATH):
-        st.error(f"Modelo no encontrado en: {MODEL_PATH}")
+        st.error("No se encontró el archivo del modelo.")
     else:
         try:
-            # --- 3. CARGA EXPERIMENTAL (IGNORANDO CONFIGURACIÓN DE CAPA) ---
-            custom_objects = {
-                "DistributionLambda": tfp.layers.DistributionLambda,
-                "model_dist": model_dist
-            }
+            with st.spinner("Reconstruyendo modelo y cargando pesos..."):
+                # PASO CLAVE: Reconstruimos la red y solo inyectamos los pesos del archivo
+                model = build_deepar_model()
 
-            # Cargamos el modelo
-            # Si el error persiste, Keras está leyendo la función lambda original del archivo.
-            # safe_mode=False es vital aquí.
-            model = keras.models.load_model(
-                MODEL_PATH,
-                custom_objects=custom_objects,
-                compile=False,
-                safe_mode=False
-            )
-            scaler = joblib.load(SCALER_PATH)
+                # Cargamos los pesos del archivo .keras (esto ignora la configuración de la capa DistributionLambda rota)
+                model.load_weights(MODEL_PATH)
 
-            # --- 4. OBTENCIÓN DE DATOS Y PREDICCIÓN ---
-            df = yf.download(SYMBOL, period="5d", interval="5m", progress=False).dropna()
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
+                scaler = joblib.load(SCALER_PATH)
 
-            actual_p = df['Close'].iloc[-1]
-            data_scaled = scaler.transform(df[['Close', 'Volume']].values)
+                # Datos de mercado
+                df = yf.download(SYMBOL, period="5d", interval="5m", progress=False).dropna()
+                if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
 
-            # El secreto: Convertir a tensor de TF ANTES de pasar al modelo
-            input_window = data_scaled[-100:].astype(np.float32)
-            input_tensor = tf.convert_to_tensor(np.expand_dims(input_window, axis=0))
+                actual_p = df['Close'].iloc[-1]
+                data_scaled = scaler.transform(df[['Close', 'Volume']].values)
 
-            # Realizamos la inferencia pasándole un Tensor, no un array de Numpy
-            dist_pred = model(input_tensor)
+                # Inferencia con Tensor limpio
+                input_data = tf.convert_to_tensor(np.expand_dims(data_scaled[-100:], axis=0), dtype=tf.float32)
+                dist_pred = model(input_data)
 
-            st.subheader(f"🎯 Análisis para {SYMBOL}")
-            st.write(f"Precio Actual: **${actual_p:.2f}**")
+                st.subheader(f"🎯 Resultados para {SYMBOL}")
+                st.write(f"Precio Actual: **${actual_p:.2f}**")
 
-            if niveles_raw:
-                niveles = [float(n.strip()) for n in niveles_raw.split(",")]
-                resultados = []
-                for n in niveles:
-                    p, e = calcular_probabilidad_temporal(dist_pred, n, actual_p, scaler)
-                    resultados.append({
-                        "Nivel": f"${n:.2f}",
-                        "Probabilidad": f"{p}%",
-                        "ETA (velas)": e
-                    })
-                st.table(pd.DataFrame(resultados))
+                if niveles_raw:
+                    niveles = [float(n.strip()) for n in niveles_raw.split(",")]
+                    res = [{"Nivel": f"${n:.2f}",
+                            "Probabilidad": f"{calcular_probabilidad_temporal(dist_pred, n, actual_p, scaler)[0]}%",
+                            "ETA": calcular_probabilidad_temporal(dist_pred, n, actual_p, scaler)[1]} for n in niveles]
+                    st.table(pd.DataFrame(res))
 
         except Exception as e:
-            st.error(f"Error persistente en TFP: {str(e)}")
-            st.info("Este error ocurre por una incompatibilidad de Numpy en el servidor.")
+            st.error(f"Error en reconstrucción: {str(e)}")
+            st.info("Asegúrate de que las unidades de la capa LSTM coincidan con tu entrenamiento original.")
